@@ -95,12 +95,14 @@ var Slider *widget.Slider
 var isPlaying bool
 var currentTrack *Track
 
-func NewTrack(author, name, duration, path string, seconds float64, Slider *widget.Slider) *Track {
+func NewTrack(author, name, duration, path string, seconds float64, Slider *widget.Slider, s beep.StreamSeekCloser, fm beep.Format) *Track {
 	t := &Track{
 		Author:      widget.NewLabel(author + "\t —"),
 		NameOfTrack: widget.NewLabel(name),
 		Time:        widget.NewLabel(duration),
 		Path:        path,
+		format:      fm,
+		streamer:    s,
 	}
 
 	t.Button = widget.NewButton("Play", func() {
@@ -115,45 +117,26 @@ func NewTrack(author, name, duration, path string, seconds float64, Slider *widg
 		}
 
 		if !isPlaying {
+			currentTrack = t
 			if t.ctrl == nil {
-				f, err := os.Open(path)
-				if err != nil {
-					fyne.LogError("Failed to open file", err)
-					return
-				}
-
-				s, ft, err := mp3.Decode(f)
-				if err != nil {
-					fyne.LogError("Failed to decode file", err)
-					return
-				}
-
-				t.format = ft
-				t.streamer = s
 				t.ctrl = &beep.Ctrl{Streamer: beep.Loop(-1, t.streamer)}
+				//t.ctrl = &beep.Ctrl{Streamer: t.streamer}
 
 				speaker.Play(t.ctrl)
 
 				Slider.OnChanged = func(value float64) {
 					if t.streamer != nil {
-						t.streamer.Seek(t.format.SampleRate.N(time.Second) * int(value))
+						currentTrack.streamer.Seek(currentTrack.format.SampleRate.N(time.Second) * int(value))
 					}
 				}
 
-				go func() {
-					for {
-						if t.ctrl != nil && !t.ctrl.Paused {
-							Slider.Value = float64(t.streamer.Position()) / float64(t.format.SampleRate)
-							Slider.Refresh()
-						}
-						time.Sleep(time.Second)
-					}
-				}()
+				go updateSliderAndConsole(t, Slider)
+
 			}
 
 			t.ctrl.Paused = false
 			isPlaying = true
-			currentTrack = t
+
 		} else {
 			t.ctrl.Paused = true
 			isPlaying = false
@@ -163,9 +146,64 @@ func NewTrack(author, name, duration, path string, seconds float64, Slider *widg
 	return t
 }
 
+func updateSliderAndConsole(t *Track, Slider *widget.Slider) {
+	for {
+		nowsec := int64(float64(currentTrack.streamer.Position()) / float64(currentTrack.format.SampleRate))
+		sec := int64(float64(currentTrack.streamer.Len()) / float64(currentTrack.format.SampleRate))
+		Slider.Max = float64(sec)
+		Slider.Value = float64(currentTrack.streamer.Position()) / float64(currentTrack.format.SampleRate)
+		Slider.Refresh()
+		time.Sleep(time.Second)
+		fmt.Println(nowsec, " / ", sec, "  ", currentTrack.NameOfTrack.Text)
+		if currentTrack.ctrl != nil && !currentTrack.ctrl.Paused {
+
+			if (nowsec - 1) >= (sec - 3) {
+				// Включаем следующий трек
+				fmt.Println(currentTrack.NameOfTrack.Text)
+				currentTrack.ctrl.Paused = true
+				PlayNextTrack()
+
+				break
+			}
+		}
+	}
+}
+
 func (t *Track) Container() *fyne.Container {
 	return container.NewVBox(container.NewHBox(t.Button, t.Author, t.NameOfTrack, t.Time))
 }
+
+func PlayNextTrack() {
+	// Находим текущий индекс трека
+	currentIndex := -1
+	for i, track := range TrackListPath {
+		if track == currentTrack.Path {
+			currentIndex = i
+			break
+		}
+	}
+	fmt.Println(currentTrack.NameOfTrack.Text)
+	// Переключаемся на следующий трек
+	if currentIndex != -1 && currentIndex < len(TrackListPath)-1 {
+		if currentIndex == (len(TrackListPath) - 1) {
+			TrackStructList[0].Button.OnTapped()
+			currentTrack = TrackStructList[0] // Обновляем currentTrack
+		} else {
+			TrackStructList[currentIndex+1].Button.OnTapped()
+			currentTrack = TrackStructList[currentIndex+1]
+		}
+	}
+	currentTrack = TrackStructList[currentIndex+1]
+	fmt.Println(currentTrack.NameOfTrack.Text)
+	currentIndex = -1
+}
+
+func PlayTrack(track *Track) {
+	currentTrack.Button.OnTapped()
+}
+
+var TrackListPath []string
+var TrackStructList []*Track
 
 func main() {
 
@@ -180,6 +218,7 @@ func main() {
 	if err != nil {
 		fmt.Println("Error loading tracks:", err)
 	} else {
+		TrackListPath = tracks
 		fileInfo, err := os.Stat("tracks.json")
 		if err != nil {
 			fmt.Println("Error getting file info:", err)
@@ -206,7 +245,14 @@ func main() {
 					fmt.Println("Error decode file:", err)
 				}
 
-				track := NewTrack(tag.Artist(), tag.Title(), duration, filePath, seconds, Slider)
+				streamer, format, err := mp3.Decode(mp3File)
+				if err != nil {
+					fyne.LogError("Failed to decode file", err)
+					return
+				}
+
+				track := NewTrack(tag.Artist(), tag.Title(), duration, filePath, seconds, Slider, streamer, format)
+				TrackStructList = append(TrackStructList, track)
 				content.Add(track.Container())
 				content.Refresh()
 			}
@@ -248,13 +294,19 @@ func main() {
 				fmt.Println("Error decode file:", err)
 			}
 
+			streamer, format, err := mp3.Decode(mp3File)
+			if err != nil {
+				fyne.LogError("Failed to decode file", err)
+				return
+			}
+
 			tracks = append(tracks, filePath)
 			err = saveTracks(tracks, "tracks.json")
 			if err != nil {
 				fmt.Println("Error save Tracks")
 			}
 
-			track := NewTrack(tag.Artist(), tag.Title(), duration, filePath, seconds, Slider)
+			track := NewTrack(tag.Artist(), tag.Title(), duration, filePath, seconds, Slider, streamer, format)
 			content.Add(track.Container())
 			content.Refresh()
 		}, w)
